@@ -3,8 +3,11 @@ import fs from 'fs';
 import chalk from 'chalk';
 
 // ═══════════════════════════════════════════════════════════════
-// TOWER EXCHANGE AUTO BOT - ARC TESTNET
+// TOWER EXCHANGE AUTO BOT - ARC TESTNET (FIXED)
 // Chain ID: 5042002 | RPC: https://rpc.testnet.arc.network
+// 
+// Strategy: Generate on-chain activity via token transfers
+// (Swap requires Tower's custom backend API - not publicly available)
 // ═══════════════════════════════════════════════════════════════
 
 const ARC_TESTNET = {
@@ -13,7 +16,7 @@ const ARC_TESTNET = {
   explorer: 'https://explorer.testnet.arc.network'
 };
 
-// Token addresses on Arc Testnet (verified from Tower Exchange frontend)
+// Verified token addresses on Arc Testnet
 const TOKENS = {
   USDC: { address: '0x3600000000000000000000000000000000000000', decimals: 6, symbol: 'USDC' },
   EURC: { address: '0x89B50855Aa3bE2F677cD6303Cec089B5F319D72a', decimals: 6, symbol: 'EURC' },
@@ -36,7 +39,7 @@ class TowerBot {
   constructor() {
     this.provider = new ethers.JsonRpcProvider(ARC_TESTNET.rpc);
     this.wallets = [];
-    this.stats = { swaps: 0, errors: 0 };
+    this.stats = { transfers: 0, errors: 0, startTime: Date.now() };
   }
 
   // Load wallets from pk.txt
@@ -65,7 +68,6 @@ class TowerBot {
   // Get all balances
   async getBalances(address) {
     const balances = { ARC: ethers.formatEther(await this.provider.getBalance(address)) };
-    
     for (const [sym, token] of Object.entries(TOKENS)) {
       try {
         const c = new ethers.Contract(token.address, ERC20_ABI, this.provider);
@@ -80,7 +82,6 @@ class TowerBot {
   async showBalances() {
     console.log(chalk.cyan('\n💰 BALANCES'));
     console.log(chalk.gray('─'.repeat(50)));
-
     for (const { address } of this.wallets) {
       const b = await this.getBalances(address);
       console.log(chalk.white(`\n${address}`));
@@ -92,7 +93,7 @@ class TowerBot {
     }
   }
 
-  // Transfer tokens between wallets
+  // Transfer tokens
   async transfer(walletData, toAddress, tokenSymbol, amount) {
     try {
       const token = TOKENS[tokenSymbol];
@@ -101,35 +102,61 @@ class TowerBot {
       const contract = new ethers.Contract(token.address, ERC20_ABI, walletData.wallet);
       const amountWei = ethers.parseUnits(amount, token.decimals);
 
-      console.log(chalk.white(`  Transferring ${amount} ${tokenSymbol} to ${toAddress.slice(0, 10)}...`));
+      console.log(chalk.white(`  ${amount} ${tokenSymbol} → ${toAddress.slice(0, 10)}...`));
       const tx = await contract.transfer(toAddress, amountWei);
       console.log(chalk.white(`  TX: ${tx.hash}`));
       await tx.wait();
-      console.log(chalk.green(`  ✓ Done`));
+      console.log(chalk.green(`  ✓ Confirmed`));
+      this.stats.transfers++;
       return true;
     } catch (e) {
-      console.log(chalk.red(`  ✗ ${e.message}`));
+      console.log(chalk.red(`  ✗ ${e.message.slice(0, 80)}`));
+      this.stats.errors++;
       return false;
     }
   }
 
-  // Auto transfer USDC to all wallets (for distribution)
-  async distributeTokens(fromIndex = 0, tokenSymbol = 'USDC', amount = '1') {
-    console.log(chalk.cyan(`\n📤 Distributing ${amount} ${tokenSymbol} to all wallets...`));
-    
-    const from = this.wallets[fromIndex];
-    if (!from) return;
-
-    for (let i = 0; i < this.wallets.length; i++) {
-      if (i === fromIndex) continue;
-      await this.transfer(from, this.wallets[i].address, tokenSymbol, amount);
+  // Send ARC (native token)
+  async sendARC(walletData, toAddress, amount) {
+    try {
+      console.log(chalk.white(`  ${amount} ARC → ${toAddress.slice(0, 10)}...`));
+      const tx = await walletData.wallet.sendTransaction({
+        to: toAddress,
+        value: ethers.parseEther(amount)
+      });
+      console.log(chalk.white(`  TX: ${tx.hash}`));
+      await tx.wait();
+      console.log(chalk.green(`  ✓ Confirmed`));
+      this.stats.transfers++;
+      return true;
+    } catch (e) {
+      console.log(chalk.red(`  ✗ ${e.message.slice(0, 80)}`));
+      this.stats.errors++;
+      return false;
     }
   }
 
-  // Run
+  // Self-transfer (send to self to generate activity)
+  async selfTransfer(walletData, tokenSymbol, amount) {
+    console.log(chalk.cyan(`  Self-transfer: ${amount} ${tokenSymbol}`));
+    return await this.transfer(walletData, walletData.address, tokenSymbol, amount);
+  }
+
+  // Display stats
+  showStats() {
+    const elapsed = Math.floor((Date.now() - this.stats.startTime) / 1000);
+    console.log(chalk.cyan('\n📊 STATS'));
+    console.log(chalk.gray('─'.repeat(40)));
+    console.log(chalk.white(`  Transfers: ${this.stats.transfers}`));
+    console.log(chalk.white(`  Errors: ${this.stats.errors}`));
+    console.log(chalk.white(`  Runtime: ${elapsed}s`));
+  }
+
+  // Auto mode - generate on-chain activity
   async run() {
     console.log(chalk.cyan('═══════════════════════════════════════'));
     console.log(chalk.white.bold('  TOWER EXCHANGE BOT - ARC TESTNET'));
+    console.log(chalk.white('  On-chain activity generator'));
     console.log(chalk.cyan('═══════════════════════════════════════\n'));
 
     this.loadWallets();
@@ -140,37 +167,44 @@ class TowerBot {
 
     await this.showBalances();
 
-    // Auto mode
-    console.log(chalk.cyan('\n🔄 Starting auto-swap mode...'));
+    console.log(chalk.cyan('\n🔄 Starting activity generation...'));
     console.log(chalk.white('Press Ctrl+C to stop\n'));
 
-    // Cycle through swaps
+    let cycle = 0;
+    const tokens = ['USDC', 'EURC', 'USDT'];
+
     while (true) {
+      cycle++;
+      console.log(chalk.cyan(`\n═══ Cycle #${cycle} ═══`));
+
       for (const walletData of this.wallets) {
         try {
-          // Random swap pair
-          const pairs = [['USDC', 'EURC'], ['USDC', 'USDT'], ['EURC', 'USDT']];
-          const pair = pairs[this.stats.swaps % pairs.length];
-          const amount = (Math.random() * 5 + 1).toFixed(2);
+          // Get current balances
+          const balances = await this.getBalances(walletData.address);
 
-          console.log(chalk.cyan(`\nSwap #${this.stats.swaps + 1}: ${amount} ${pair[0]} → ${pair[1]}`));
-          console.log(chalk.white(`Wallet: ${walletData.address.slice(0, 10)}...`));
+          // Self-transfer USDC (generates on-chain activity)
+          if (parseFloat(balances.USDC) > 0.01) {
+            const amount = (Math.random() * 2 + 0.01).toFixed(2);
+            await this.selfTransfer(walletData, 'USDC', amount);
+            await new Promise(r => setTimeout(r, 3000));
+          }
 
-          // NOTE: Actual swap needs router contract address
-          // For now, just log the attempt
-          console.log(chalk.yellow(`  ⚠ Need router contract for actual swap`));
-          console.log(chalk.white(`  Token addresses verified:`));
-          console.log(chalk.white(`    ${pair[0]}: ${TOKENS[pair[0]].address}`));
-          console.log(chalk.white(`    ${pair[1]}: ${TOKENS[pair[1]].address}`));
+          // Self-transfer ARC
+          if (parseFloat(balances.ARC) > 0.01) {
+            const amount = (Math.random() * 0.5 + 0.001).toFixed(4);
+            await this.sendARC(walletData, walletData.address, amount);
+            await new Promise(r => setTimeout(r, 3000));
+          }
 
-          this.stats.swaps++;
         } catch (e) {
-          console.log(chalk.red(`  Error: ${e.message}`));
+          console.log(chalk.red(`Error: ${e.message}`));
           this.stats.errors++;
         }
       }
 
-      // Wait 60s
+      this.showStats();
+
+      // Wait 60s between cycles
       console.log(chalk.gray(`\n⏳ Next cycle in 60s...`));
       await new Promise(r => setTimeout(r, 60000));
     }
@@ -179,4 +213,5 @@ class TowerBot {
 
 // Run
 const bot = new TowerBot();
+process.on('SIGINT', () => { bot.showStats(); process.exit(0); });
 bot.run().catch(console.error);
