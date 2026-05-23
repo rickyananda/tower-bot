@@ -1,0 +1,9 @@
+{
+  "proxy": "",
+  "wallets": [
+    "0xd06fF3255e00E6cE7Df0e6927732dFbb012d048e",
+    "0x7CFbFD7cdBf2faa570187392d4508C7ee0188C1E"
+  ],
+  "use_cloakbrowser": true,
+  "cloakbrowser_path": "/home/user/.cloakbrowser/chromium-146.0.7680.177.5/chrome"
+}
